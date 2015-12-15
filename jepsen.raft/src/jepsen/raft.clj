@@ -20,51 +20,80 @@
             [jdb-jepsen.core          :as jdb]))
   
 (def pid-file "/tmp/jdb.pid")
+(def log-file "/tmp/jepsen.log")
 
 (defn client-addr-url [node]
-  (str "http://" (name node) ":6000"))
+  (str (name node) ":6000"))
 
 (defn raft-addr-url [node]
-  (str "http://" (name node) ":5000"))
+  (str (name node) ":5000"))
 
-(defn peers
-  "The command line list of raft peers"
-  [test]
+(defn peers [test]
   (->> test
        :nodes
        (map raft-addr-url)
        (str/join ",")))
 
+(defn servers [test]
+  (->> test
+       :nodes
+       (map client-addr-url)
+       (str/join ",")))
+
 (defn start-jdb!
   [test node]
   (info node "starting jdb")
-  (cu/wget! "http://csh.rit.edu/~jd/jdb.jar")
   (c/exec :java
-          :-jar :jdb.jar
+          :-jar (cu/wget! "http://csh.rit.edu/~jd/jdb.jar")
           :-client (client-addr-url node)
           :-raftAddr (raft-addr-url node)
-          :-peers (peers node)
+          :-peers (peers test)
+          :-servers (servers test)
           :-pid pid-file
-          (c/lit "2>&1")))
+          :-log.level "DEBUG"
+          :-log.output "/tmp/output.log"
+          (c/lit " &")))
 
 (defn uuid [] (str (java.util.UUID/randomUUID)))
 
 (defn db []
-  (let [running (atom nil)]
-    (reify db/DB
-      (setup! [this test node]
-        (start-jdb! test node)
-        (info node "jdb started"))
+  (reify db/DB
+    (setup! [_ test node]
+      (c/cd "/tmp"
+            (let [jar (cu/wget! "http://csh.rit.edu/~jd/jdb.jar")] 
+              (info node "starting jdb...")
+              (c/exec :start-stop-daemon :--start
+                      :--background
+                      :--make-pidfile
+                      :--pidfile pid-file
+                      :--chdir "/tmp"
+                      :--exec "/usr/bin/java"
+                      :--no-close
+                      :--
+                      :-jar jar
+                      :-client (client-addr-url node)
+                      :-raftAddr (raft-addr-url node)
+                      :-peers (peers test)
+                      :-servers (servers test)
+                      :-log.level "INFO"
+                      :-log.output "/tmp/output.log"
+                      :>> log-file
+                      (c/lit "2>&1"))
+              (Thread/sleep (* 10 1000))
+              (info node "jdb started"))))
 
-      (teardown! [_ test node]
-        (meh (c/exec :kill :-9 (slurp pid-file)))
-        (c/exec :rm pid-file)
-        (info node "jdb nuked")))))
+    (teardown! [_ test node]
+      (cu/grepkill "jdb.jar")
+      (c/exec :rm "/tmp/jdb.jar")
+      (c/exec :rm "/tmp/output.log")
+      (c/exec :rm log-file)
+      (info node "jdb nuked"))))
 
 (defrecord CASClient [k client]
   client/Client
   (setup! [this test node]
-    (let [client (jdb/connect (str "http://" (name node)) (uuid))]
+    (info node (str "CAS client generated " (name node)))
+    (let [client (jdb/connect (str "http://" (client-addr-url node)) (uuid))]
       (jdb/put! client k (json/generate-string nil))
       (assoc this :client client)))
 
@@ -90,11 +119,15 @@
                                               (json/generate-string value)
                                               (json/generate-string value'))]
                  (assoc op :type (if ok? :ok :fail))))
+        
         (catch java.net.SocketTimeoutException e
           (assoc op :type fail :value :timed-out))
 
-        (catch [:status 307] e
-          (assoc op :type fail :value :redirect-loop))
+        (catch [:status 404] e
+          (assoc op :type fail :value :404))
+
+        (catch [:status 400] e
+          (assoc op :type fail :value :400))
 
         (catch (and (instance? clojure.lang.ExceptionInfo %)) e
           (assoc op :type fail :value e))
@@ -108,3 +141,5 @@
   "A compare and set register"
   []
    (CASClient. "jepsen" nil))
+
+

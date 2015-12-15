@@ -19,8 +19,10 @@
     (let [test (run!
                  (assoc
                    noop-test
-                   :name      "etcd"
+                   :name      "jdb"
                    :os        debian/os
+                   :ssh       {:username "root" 
+                               :private-key-path "~/.ssh/id_rsa"}
                    :db        (db)
                    :client    (cas-client)
                    :model     (model/cas-register)
